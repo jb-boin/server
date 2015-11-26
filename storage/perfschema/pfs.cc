@@ -1444,19 +1444,21 @@ static void register_statement_v1(const char *category,
 
   for (; count>0; count--, info++)
   {
-    DBUG_ASSERT(info->m_name != NULL);
-    len= strlen(info->m_name);
-    full_length= prefix_length + len;
-    if (likely(full_length <= PFS_MAX_INFO_NAME_LENGTH))
+    if(info->m_name != NULL)
     {
-      memcpy(formatted_name + prefix_length, info->m_name, len);
-      info->m_key= register_statement_class(formatted_name, full_length, info->m_flags);
-    }
-    else
-    {
-      pfs_print_error("register_statement_v1: name too long <%s>\n",
-                      info->m_name);
-      info->m_key= 0;
+      len= strlen(info->m_name);
+      full_length= prefix_length + len;
+      if (likely(full_length <= PFS_MAX_INFO_NAME_LENGTH))
+      {
+        memcpy(formatted_name + prefix_length, info->m_name, len);
+        info->m_key= register_statement_class(formatted_name, full_length, info->m_flags);
+      }
+      else
+      {
+        pfs_print_error("register_statement_v1: name too long <%s>\n",
+                        info->m_name);
+        info->m_key= 0;
+      }
     }
   }
   return;
