@@ -267,6 +267,7 @@ ret:
     mysql_cond_broadcast(&COND_thread_count);
     mysql_mutex_unlock(&LOCK_thread_count);
     delete thd;
+    my_pthread_setspecific_ptr(THR_THD,  NULL);
     thd= 0;
   }
 }
