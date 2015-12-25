@@ -1,6 +1,5 @@
 #include <my_config.h>
 #include <gssapi/gssapi.h>
-#include <gssapi/gssapi_ext.h>
 #include <stdio.h>
 #include <mysql/plugin_auth.h>
 #include <my_sys.h>
