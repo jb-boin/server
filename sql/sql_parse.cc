@@ -110,7 +110,7 @@
 #include "wsrep_thd.h"
 
 static void wsrep_mysql_parse(THD *thd, char *rawbuf, uint length,
-                              Parser_state *parser_state);
+                              Parser_state *parser_state, bool is_com_multi);
 
 /**
   @defgroup Runtime_Environment Runtime Environment
@@ -900,7 +900,7 @@ void execute_init_command(THD *thd, LEX_STRING *init_command,
   */
   save_vio= thd->net.vio;
   thd->net.vio= 0;
-  dispatch_command(COM_QUERY, thd, buf, len);
+  dispatch_command(COM_QUERY, thd, buf, len, FALSE);
   thd->client_capabilities= save_client_capabilities;
   thd->net.vio= save_vio;
 
@@ -1018,7 +1018,7 @@ static void handle_bootstrap_impl(THD *thd)
       break;
     }
 
-    mysql_parse(thd, thd->query(), length, &parser_state);
+    mysql_parse(thd, thd->query(), length, &parser_state, FALSE);
 
     bootstrap_error= thd->is_error();
     thd->protocol->end_statement();
@@ -1113,6 +1113,23 @@ void cleanup_items(Item *item)
   for (; item ; item=item->next)
     item->cleanup();
   DBUG_VOID_RETURN;
+}
+
+static enum enum_server_command fetch_command(THD *thd, char *packet)
+{
+  enum enum_server_command
+    command= (enum enum_server_command) (uchar) packet[0];
+  NET *net= &thd->net;
+  DBUG_ENTER("fetch_command");
+
+  if (command >= COM_END ||
+      (command >= COM_MDB_GAP_BEG && command <= COM_MDB_GAP_END))
+    command= COM_END;				// Wrong command
+
+  DBUG_PRINT("info",("Command on %s = %d (%s)",
+                     vio_description(net->vio), command,
+                     command_name[command].str));
+  DBUG_RETURN(command);
 }
 
 
@@ -1304,15 +1321,8 @@ bool do_command(THD *thd)
   /* Do not rely on my_net_read, extra safety against programming errors. */
   packet[packet_length]= '\0';                  /* safety */
 
-  command= (enum enum_server_command) (uchar) packet[0];
 
-  if (command >= COM_END ||
-      (command >= COM_MDB_GAP_BEG && command <= COM_MDB_GAP_END))
-    command= COM_END;				// Wrong command
-
-  DBUG_PRINT("info",("Command on %s = %d (%s)",
-                     vio_description(net->vio), command,
-                     command_name[command].str));
+  command= fetch_command(thd, packet);
 
 #ifdef WITH_WSREP
   /*
@@ -1338,7 +1348,8 @@ bool do_command(THD *thd)
 
   DBUG_ASSERT(packet_length);
   DBUG_ASSERT(!thd->apc_target.is_enabled());
-  return_value= dispatch_command(command, thd, packet+1, (uint) (packet_length-1));
+  return_value= dispatch_command(command, thd, packet+1,
+                                 (uint) (packet_length-1), FALSE);
 #ifdef WITH_WSREP
   if (WSREP(thd))
   {
@@ -1356,7 +1367,7 @@ bool do_command(THD *thd)
                    my_charset_latin1.csname);
       }
       return_value= dispatch_command(command, thd, thd->wsrep_retry_query,
-                                     thd->wsrep_retry_query_len);
+                                     thd->wsrep_retry_query_len, FALSE);
       thd->variables.character_set_client = current_charset;
     }
 
@@ -1448,6 +1459,42 @@ static my_bool deny_updates_if_read_only_option(THD *thd,
 
 
 /**
+  check COM_MULTI packet
+
+  @param thd             thread handle
+  @param packet          pointer on the packet of commands
+  @param packet_length   length of this packet
+
+  @retval TRUE  - Error
+  @retval FALSE - OK
+*/
+
+bool maria_multi_check(THD *thd, char *packet, uint packet_length)
+{
+  DBUG_ENTER("maria_multi_check");
+  while (packet_length)
+  {
+    // length of command + 3 bytes where that length was stored
+    uint subpacket_length= (uint3korr(packet) + 3);
+    DBUG_PRINT("info", ("sub-packet length: %d  command: %x",
+                        subpacket_length, packet[3]));
+
+    if (subpacket_length == 0 ||
+        subpacket_length > packet_length)
+    {
+      my_message(ER_UNKNOWN_COM_ERROR, ER_THD(thd, ER_UNKNOWN_COM_ERROR),
+                 MYF(0));
+      DBUG_RETURN(TRUE);
+    }
+
+    packet+= subpacket_length;
+    packet_length-= subpacket_length;
+  }
+  DBUG_RETURN(FALSE);
+}
+
+
+/**
   Perform one connection-level (COM_XXXX) command.
 
   @param command         type of command to perform
@@ -1456,6 +1503,7 @@ static my_bool deny_updates_if_read_only_option(THD *thd,
   @param packet_length   length of packet + 1 (to show that data is
                          null-terminated) except for COM_SLEEP, where it
                          can be zero.
+  @param is_com_multi    recursive call from COM_MULTI
 
   @todo
     set thd->lex->sql_command to SQLCOM_END here.
@@ -1469,15 +1517,20 @@ static my_bool deny_updates_if_read_only_option(THD *thd,
         COM_QUIT/COM_SHUTDOWN
 */
 bool dispatch_command(enum enum_server_command command, THD *thd,
-		      char* packet, uint packet_length)
+		      char* packet, uint packet_length, bool is_com_multi)
 {
   NET *net= &thd->net;
   bool error= 0;
   bool do_end_of_statement= true;
   DBUG_ENTER("dispatch_command");
-  DBUG_PRINT("info", ("command: %d", command));
+  DBUG_PRINT("info", ("command: %d %s", command,
+                      (command_name[command].str != 0 ?
+                       command_name[command].str :
+                       "<?>")));
+  bool drop_more_results= 0;
 
-  inc_thread_running();
+  if (!is_com_multi)
+    inc_thread_running();
 
 #ifdef WITH_WSREP
   if (WSREP(thd))
@@ -1567,6 +1620,13 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     beginning of each command.
   */
   thd->server_status&= ~SERVER_STATUS_CLEAR_SET;
+  if (is_com_multi)
+  {
+    drop_more_results= !MY_TEST(thd->server_status &
+                                SERVER_MORE_RESULTS_EXISTS);
+    thd->server_status|= SERVER_MORE_RESULTS_EXISTS;
+  }
+
   switch (command) {
   case COM_INIT_DB:
   {
@@ -1714,9 +1774,11 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       break;
 
     if (WSREP_ON)
-      wsrep_mysql_parse(thd, thd->query(), thd->query_length(), &parser_state);
+      wsrep_mysql_parse(thd, thd->query(), thd->query_length(), &parser_state,
+                        is_com_multi);
     else
-      mysql_parse(thd, thd->query(), thd->query_length(), &parser_state);
+      mysql_parse(thd, thd->query(), thd->query_length(), &parser_state,
+                  is_com_multi);
 
     while (!thd->killed && (parser_state.m_lip.found_semicolon != NULL) &&
            ! thd->is_error())
@@ -1801,9 +1863,11 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       /* TODO: set thd->lex->sql_command to SQLCOM_END here */
 
       if (WSREP_ON)
-        wsrep_mysql_parse(thd, beginning_of_next_stmt, length, &parser_state);
+        wsrep_mysql_parse(thd, beginning_of_next_stmt, length, &parser_state,
+                          is_com_multi);
       else
-        mysql_parse(thd, beginning_of_next_stmt, length, &parser_state);
+        mysql_parse(thd, beginning_of_next_stmt, length, &parser_state,
+                    is_com_multi);
 
     }
 
@@ -1855,6 +1919,9 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     }
     packet= arg_end + 1;
     thd->reset_for_next_command();
+    // thd->reset_for_next_command reset state => restore it
+    if (is_com_multi)
+      thd->server_status|= SERVER_MORE_RESULTS_EXISTS;
     lex_start(thd);
     /* Must be before we init the table list. */
     if (lower_case_table_names)
@@ -2133,6 +2200,63 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     general_log_print(thd, command, NullS);
     my_eof(thd);
     break;
+  case COM_MULTI:
+    if (is_com_multi)
+    {
+      /* we do not allow deep recursion because it is not safe */
+      my_message(ER_UNKNOWN_COM_ERROR, ER_THD(thd, ER_UNKNOWN_COM_ERROR),
+                 MYF(0));
+      break;
+    }
+
+    if (maria_multi_check(thd, packet, packet_length))
+      break;
+    {
+      /* We have to store next length because it will be destroyed by '\0' */
+      uint next_subpacket_length= uint3korr(packet);
+      unsigned char *readbuff= net->buff;
+      unsigned long readbuff_max_packet= net->max_packet;
+
+
+      if (!(net->buff=(uchar*) my_malloc((size_t) net->max_packet+
+                                         NET_HEADER_SIZE + COMP_HEADER_SIZE +1,
+                                         MYF(MY_WME))))
+        break;
+      net->buff_end=net->buff + net->max_packet;
+      net->write_pos=net->read_pos = net->buff;
+
+      while(packet_length)
+      {
+        uint subpacket_length= next_subpacket_length;
+        if (subpacket_length + 3 < packet_length)
+          next_subpacket_length= uint3korr(packet + subpacket_length + 3);
+        /* safety like in do_command() */
+        packet[subpacket_length + 3]= '\0';
+
+        enum enum_server_command subcommand= fetch_command(thd, (packet + 3));
+
+        if (dispatch_command(subcommand, thd, packet + 4,
+                             subpacket_length - 1, TRUE))
+          break;
+
+        DBUG_ASSERT(subpacket_length + 3 <= packet_length);
+        packet+= (subpacket_length + 3);
+        packet_length-= (subpacket_length + 3);
+      }
+      net_flush(net);
+      my_free(net->buff);
+      net->buff= readbuff;
+      net->max_packet= readbuff_max_packet;
+      net->buff_end=net->buff + net->max_packet;
+      net->write_pos=net->read_pos = net->buff;
+
+      if (!thd->is_error())
+      {
+        thd->get_stmt_da()->reset_diagnostics_area();
+        my_ok(thd);
+      }
+    }
+    break;
   case COM_SLEEP:
   case COM_CONNECT:				// Impossible here
   case COM_TIME:				// Impossible from client
@@ -2172,6 +2296,8 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     thd->protocol->end_statement();
     query_cache_end_of_result(thd);
   }
+  if (drop_more_results)
+    thd->server_status&= ~SERVER_MORE_RESULTS_EXISTS;
 
   if (!thd->is_error() && !thd->killed_errno())
     mysql_audit_general(thd, MYSQL_AUDIT_GENERAL_RESULT, 0, 0);
@@ -2195,8 +2321,11 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   thd->m_statement_psi= NULL;
   thd->m_digest= NULL;
 
-  dec_thread_running();
-  thd->packet.shrink(thd->variables.net_buffer_length);	// Reclaim some memory
+  if (!is_com_multi)
+  {
+    dec_thread_running();
+    thd->packet.shrink(thd->variables.net_buffer_length); // Reclaim some memory
+  }
   free_root(thd->mem_root,MYF(MY_KEEP_PREALLOC));
 
 #if defined(ENABLED_PROFILING)
@@ -7334,7 +7463,7 @@ void mysql_init_multi_delete(LEX *lex)
 }
 
 static void wsrep_mysql_parse(THD *thd, char *rawbuf, uint length,
-                              Parser_state *parser_state)
+                              Parser_state *parser_state, bool is_com_multi)
 {
 #ifdef WITH_WSREP
   bool is_autocommit=
@@ -7353,7 +7482,7 @@ static void wsrep_mysql_parse(THD *thd, char *rawbuf, uint length,
       MYSQL_SET_STATEMENT_TEXT(thd->m_statement_psi, thd->query(),
 	                       thd->query_length());
     }
-    mysql_parse(thd, rawbuf, length, parser_state);
+    mysql_parse(thd, rawbuf, length, parser_state, is_com_multi);
 
     if (WSREP(thd)) {
       /* wsrep BF abort in query exec phase */
@@ -7453,7 +7582,7 @@ static void wsrep_mysql_parse(THD *thd, char *rawbuf, uint length,
 */
 
 void mysql_parse(THD *thd, char *rawbuf, uint length,
-                 Parser_state *parser_state)
+                 Parser_state *parser_state, bool is_com_multi)
 {
   int error __attribute__((unused));
   DBUG_ENTER("mysql_parse");
@@ -7477,6 +7606,8 @@ void mysql_parse(THD *thd, char *rawbuf, uint length,
   */
   lex_start(thd);
   thd->reset_for_next_command();
+  if (is_com_multi)
+    thd->server_status|= SERVER_MORE_RESULTS_EXISTS;
 
   if (query_cache_send_result_to_client(thd, rawbuf, length) <= 0)
   {
