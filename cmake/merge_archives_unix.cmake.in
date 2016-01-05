@@ -24,6 +24,7 @@ SET(CMAKE_AR "@CMAKE_AR@")
 SET(CMAKE_RANLIB "@CMAKE_RANLIB@")
 
 
+LIST(REMOVE_DUPLICATES STATIC_LIBS)
 SET(TEMP_DIR ${CMAKE_CURRENT_BINARY_DIR}/merge_archives_${TARGET})
 MAKE_DIRECTORY(${TEMP_DIR})
 # Extract each archive to its own subdirectory(avoid object filename clashes)
