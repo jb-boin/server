@@ -1963,6 +1963,16 @@ public:
 
   /* all prepared statements and cursors of this connection */
   Statement_map stmt_map;
+
+  /* Last used prepared statement */
+  Statement *last_stmt;
+  inline void set_last_stmt(Statement *stmt)
+  {
+    if (!is_error())
+      last_stmt= stmt;
+  }
+  inline void no_last_stmt() { last_stmt= NULL; }
+
   /*
     A pointer to the stack frame of handle_one_connection(),
     which is called first in the thread for handling a client

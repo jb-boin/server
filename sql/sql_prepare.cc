@@ -324,7 +324,9 @@ find_prepared_statement(THD *thd, ulong id)
     prepared statements find() will return 0 if there is a named prepared
     statement with such id.
   */
-  Statement *stmt= thd->stmt_map.find(id);
+  Statement *stmt= ((id == PREV_STMT_ID) ?
+                    thd->last_stmt :
+                    thd->stmt_map.find(id));
 
   if (stmt == 0 || stmt->type() != Query_arena::PREPARED_STATEMENT)
     return NULL;
@@ -2323,6 +2325,8 @@ void mysqld_stmt_prepare(THD *thd, const char *packet, uint packet_length)
     /* Statement map deletes statement on erase */
     thd->stmt_map.erase(stmt);
   }
+  else
+    thd->set_last_stmt(stmt);
 
   thd->protocol= save_protocol;
 
@@ -2718,6 +2722,8 @@ void mysqld_stmt_execute(THD *thd, char *packet_arg, uint packet_length)
   sp_cache_enforce_limit(thd->sp_proc_cache, stored_program_cache_size);
   sp_cache_enforce_limit(thd->sp_func_cache, stored_program_cache_size);
 
+  thd->set_last_stmt(stmt);
+
   /* Close connection socket; for use with client testing (Bug#43560). */
   DBUG_EXECUTE_IF("close_conn_after_stmt_execute", vio_close(thd->net.vio););
 
@@ -2821,6 +2827,8 @@ void mysqld_stmt_fetch(THD *thd, char *packet, uint packet_length)
     reset_stmt_params(stmt);
   }
 
+  thd->set_last_stmt(stmt);
+
   thd->restore_backup_statement(stmt, &stmt_backup);
   thd->stmt_arena= thd;
 
@@ -2877,6 +2885,8 @@ void mysqld_stmt_reset(THD *thd, char *packet)
 
   my_ok(thd);
 
+  thd->set_last_stmt(stmt);
+
   DBUG_VOID_RETURN;
 }
 
@@ -2907,6 +2917,8 @@ void mysqld_stmt_close(THD *thd, char *packet)
   DBUG_ASSERT(! stmt->is_in_use());
   stmt->deallocate();
   general_log_print(thd, thd->get_command(), NullS);
+
+  thd->no_last_stmt();
 
   DBUG_VOID_RETURN;
 }
@@ -3016,6 +3028,8 @@ void mysql_stmt_get_longdata(THD *thd, char *packet, ulong packet_length)
     stmt->last_errno= thd->get_stmt_da()->sql_errno();
     strncpy(stmt->last_error, thd->get_stmt_da()->message(), MYSQL_ERRMSG_SIZE);
   }
+  else
+    thd->set_last_stmt(stmt);
   thd->set_stmt_da(save_stmt_da);
 
   general_log_print(thd, thd->get_command(), NullS);
@@ -3170,7 +3184,8 @@ end:
 
 Prepared_statement::Prepared_statement(THD *thd_arg)
   :Statement(NULL, &main_mem_root,
-             STMT_INITIALIZED, ++thd_arg->statement_id_counter),
+             STMT_INITIALIZED,
+             ((++thd_arg->statement_id_counter) & STMT_ID_MASK)),
   thd(thd_arg),
   result(thd_arg),
   param_array(0),
