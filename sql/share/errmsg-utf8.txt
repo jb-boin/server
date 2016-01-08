@@ -7136,3 +7136,7 @@ ER_KILL_QUERY_DENIED_ERROR
         eng "You are not owner of query %lu"
         ger "Sie sind nicht Eigentümer von Abfrage %lu"
         rus "Вы не являетесь владельцем запроса %lu"
+ER_COMMULTI_BADCONTEXT 0A000
+        eng "COM_MULTI can't return a result set in the given context"
+        ger "COM_MULTI kann im gegebenen Kontext keine Ergebnismenge zurückgeben"
+        ukr "COM_MULTI не може повернути результати у цьому контексті"

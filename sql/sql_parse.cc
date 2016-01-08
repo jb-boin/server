@@ -2208,6 +2208,12 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
                  MYF(0));
       break;
     }
+    if (!(thd->client_capabilities & CLIENT_MULTI_RESULTS))
+    {
+      /* The client does not support multiple result sets being sent back */
+      my_error(ER_COMMULTI_BADCONTEXT, MYF(0));
+      break;
+    }
 
     if (maria_multi_check(thd, packet, packet_length))
       break;
