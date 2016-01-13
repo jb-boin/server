@@ -391,9 +391,8 @@ const LEX_STRING command_name[257]={
   { 0, 0 }, //251
   { 0, 0 }, //252
   { 0, 0 }, //253
-  { 0, 0 }, //254
-  { C_STRING_WITH_LEN("Com_multi") }, //255
-  { C_STRING_WITH_LEN("Error") }  // Last command number 256
+  { C_STRING_WITH_LEN("Com_multi") }, //254
+  { C_STRING_WITH_LEN("Error") }  // Last command number 255
 };
 
 const char *xa_state_names[]={
@@ -495,7 +494,7 @@ void init_update_queries(void)
   memset(server_command_flags, 0, sizeof(server_command_flags));
 
   server_command_flags[COM_STATISTICS]= CF_SKIP_QUERY_ID | CF_SKIP_QUESTIONS | CF_SKIP_WSREP_CHECK;
-  server_command_flags[COM_PING]=       CF_SKIP_QUERY_ID | CF_SKIP_QUESTIONS | CF_SKIP_WSREP_CHECK;
+  server_command_flags[COM_PING]=       CF_SKIP_QUERY_ID | CF_SKIP_QUESTIONS | CF_SKIP_WSREP_CHECK | CF_NO_COM_MULTI;
 
   server_command_flags[COM_QUIT]= CF_SKIP_WSREP_CHECK;
   server_command_flags[COM_PROCESS_INFO]= CF_SKIP_WSREP_CHECK;
@@ -520,7 +519,7 @@ void init_update_queries(void)
   server_command_flags[COM_STMT_RESET]= CF_SKIP_QUESTIONS | CF_SKIP_WSREP_CHECK;
   server_command_flags[COM_STMT_EXECUTE]= CF_SKIP_WSREP_CHECK;
   server_command_flags[COM_STMT_SEND_LONG_DATA]= CF_SKIP_WSREP_CHECK;
-  server_command_flags[COM_MULTI]= CF_SKIP_WSREP_CHECK;
+  server_command_flags[COM_MULTI]= CF_SKIP_WSREP_CHECK | CF_NO_COM_MULTI;
 
   /* Initialize the sql command flags array. */
   memset(sql_command_flags, 0, sizeof(sql_command_flags));
@@ -1479,7 +1478,7 @@ bool maria_multi_check(THD *thd, char *packet, uint packet_length)
     DBUG_PRINT("info", ("sub-packet length: %d  command: %x",
                         subpacket_length, packet[3]));
 
-    if (subpacket_length == 0 ||
+    if (subpacket_length == 3 ||
         subpacket_length > packet_length)
     {
       my_message(ER_UNKNOWN_COM_ERROR, ER_THD(thd, ER_UNKNOWN_COM_ERROR),
@@ -1528,6 +1527,9 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
                        command_name[command].str :
                        "<?>")));
   bool drop_more_results= 0;
+
+  /* keep it withing 1 byte */
+  compile_time_assert(COM_END == 255);
 
   if (!is_com_multi)
     inc_thread_running();
@@ -2201,13 +2203,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     my_eof(thd);
     break;
   case COM_MULTI:
-    if (is_com_multi)
-    {
-      /* we do not allow deep recursion because it is not safe */
-      my_message(ER_UNKNOWN_COM_ERROR, ER_THD(thd, ER_UNKNOWN_COM_ERROR),
-                 MYF(0));
-      break;
-    }
+    DBUG_ASSERT(!is_com_multi);
     if (!(thd->client_capabilities & CLIENT_MULTI_RESULTS))
     {
       /* The client does not support multiple result sets being sent back */
@@ -2223,33 +2219,44 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       unsigned char *readbuff= net->buff;
       unsigned long readbuff_max_packet= net->max_packet;
 
-
-      if (!(net->buff=(uchar*) my_malloc((size_t) net->max_packet+
+      if (!(net->buff=(uchar*) my_malloc((size_t) net->max_packet +
                                          NET_HEADER_SIZE + COMP_HEADER_SIZE +1,
                                          MYF(MY_WME))))
         break;
       net->buff_end=net->buff + net->max_packet;
       net->write_pos=net->read_pos = net->buff;
 
-      while(packet_length)
+      while (packet_length)
       {
-        uint subpacket_length= next_subpacket_length;
-        if (subpacket_length + 3 < packet_length)
-          next_subpacket_length= uint3korr(packet + subpacket_length + 3);
+        uint subpacket_length= next_subpacket_length + 3;
+        if (subpacket_length < packet_length)
+          next_subpacket_length= uint3korr(packet + subpacket_length);
         /* safety like in do_command() */
-        packet[subpacket_length + 3]= '\0';
+        packet[subpacket_length]= '\0';
 
         enum enum_server_command subcommand= fetch_command(thd, (packet + 3));
 
-        if (dispatch_command(subcommand, thd, packet + 4,
-                             subpacket_length - 1, TRUE))
-          break;
+        if (server_command_flags[subcommand] & CF_NO_COM_MULTI)
+        {
+          my_error(ER_BAD_COMMAND_IN_MULTI, MYF(0), command_name[subcommand]);
+          goto com_multi_end;
+        }
 
-        DBUG_ASSERT(subpacket_length + 3 <= packet_length);
-        packet+= (subpacket_length + 3);
-        packet_length-= (subpacket_length + 3);
+        if (dispatch_command(subcommand, thd, packet + (1 + 3),
+                             subpacket_length - (1 + 3), TRUE))
+        {
+          DBUG_ASSERT(thd->is_error());
+          goto com_multi_end;
+        }
+
+        DBUG_ASSERT(subpacket_length <= packet_length);
+        packet+= subpacket_length;
+        packet_length-= subpacket_length;
       }
-      net_flush(net);
+
+com_multi_end:
+      /* restore buffer to the original one */
+      DBUG_ASSERT(net->buff == net->write_pos); // nothing to send
       my_free(net->buff);
       net->buff= readbuff;
       net->max_packet= readbuff_max_packet;

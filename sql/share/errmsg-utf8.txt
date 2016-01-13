@@ -7140,3 +7140,6 @@ ER_COMMULTI_BADCONTEXT 0A000
         eng "COM_MULTI can't return a result set in the given context"
         ger "COM_MULTI kann im gegebenen Kontext keine Ergebnismenge zurückgeben"
         ukr "COM_MULTI не може повернути результати у цьому контексті"
+ER_BAD_COMMAND_IN_MULTI
+        eng "Command '%s' is not allowed for COM_MULTI"
+        ukr "Команда '%s' не дозволена для COM_MULTI"

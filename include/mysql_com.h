@@ -103,7 +103,7 @@ enum enum_server_command
   COM_STMT_RESET, COM_SET_OPTION, COM_STMT_FETCH, COM_DAEMON,
   /* don't forget to update const char *command_name[] in sql_parse.cc */
   COM_MDB_GAP_BEG,
-  COM_MDB_GAP_END=254,
+  COM_MDB_GAP_END=253,
   COM_MULTI,
   /* Must be last */
   COM_END
@@ -247,7 +247,11 @@ enum enum_server_command
 #define CAN_CLIENT_COMPRESS 0
 #endif
 
-/* Gather all possible capabilites (flags) supported by the server */
+/*
+  Gather all possible capabilites (flags) supported by the server
+
+  MARIADB_* flags supported only by MariaDB connector(s).
+*/
 #define CLIENT_ALL_FLAGS  (CLIENT_MYSQL | \
                            CLIENT_FOUND_ROWS | \
                            CLIENT_LONG_FLAG | \
