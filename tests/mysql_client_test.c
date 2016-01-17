@@ -18700,7 +18700,8 @@ static void test_progress_reporting()
   myheader("test_progress_reporting");
 
   conn= client_connect(CLIENT_PROGRESS, MYSQL_PROTOCOL_TCP, 0);
-  DIE_UNLESS(conn->client_flag & CLIENT_PROGRESS);
+  if (!(conn->client_flag & CLIENT_PROGRESS))
+    return;
 
   mysql_options(conn, MYSQL_PROGRESS_CALLBACK, (void*) report_progress);
   rc= mysql_query(conn, "set @save=@@global.progress_report_time");
