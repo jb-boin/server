@@ -152,7 +152,7 @@ static ulong opt_max_allowed_packet, opt_net_buffer_length;
 static uint verbose=0,opt_silent=0,opt_mysql_port=0, opt_local_infile=0;
 static uint my_end_arg;
 static char * opt_mysql_unix_port=0;
-static int connect_flag=CLIENT_INTERACTIVE;
+static ulong connect_flag=CLIENT_INTERACTIVE;
 static my_bool opt_binary_mode= FALSE;
 static int interrupted_query= 0;
 static char *current_host,*current_db,*current_user=0,*opt_password=0,
